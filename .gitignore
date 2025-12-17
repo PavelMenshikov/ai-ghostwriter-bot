@@ -1,0 +1,27 @@
+# --- Secrets & Environment ---
+.env
+.env.local
+__pycache__/
+*.py[cod]
+*$py.class
+
+# --- Virtual Environment ---
+venv/
+env/
+.venv/
+
+# --- Database & Logs ---
+*.db
+*.sqlite
+*.sqlite3
+bot_data.db
+*.log
+
+# --- IDE & OS ---
+.idea/
+.vscode/
+.DS_Store
+Thumbs.db
+
+
+project_snapshot.txt

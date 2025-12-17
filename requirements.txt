@@ -1,0 +1,6 @@
+aiogram==3.10.0
+openai==1.35.0
+python-dotenv==1.0.1
+apscheduler==3.10.4
+aiosqlite==0.20.0
+google-generativeai
