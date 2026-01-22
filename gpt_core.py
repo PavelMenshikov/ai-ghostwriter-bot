@@ -1,95 +1,113 @@
 import os
 import json
 import asyncio
-import google.generativeai as genai
-from google.generativeai.types import HarmCategory, HarmBlockThreshold
 from dotenv import load_dotenv
+from openai import AsyncOpenAI
 from database import get_style_prompt, get_recent_generated_posts
 
 load_dotenv()
 
-genai.configure(api_key=os.getenv("GEMINI_API_KEY"))
+GROQ_API_KEY = os.getenv("GROQ_API_KEY")
+GROQ_MODEL = os.getenv("GROQ_MODEL", "llama-3.3-70b-versatile")
 
-safety_settings = {
-    HarmCategory.HARM_CATEGORY_HARASSMENT: HarmBlockThreshold.BLOCK_NONE,
-    HarmCategory.HARM_CATEGORY_HATE_SPEECH: HarmBlockThreshold.BLOCK_NONE,
-    HarmCategory.HARM_CATEGORY_SEXUALLY_EXPLICIT: HarmBlockThreshold.BLOCK_NONE,
-    HarmCategory.HARM_CATEGORY_DANGEROUS_CONTENT: HarmBlockThreshold.BLOCK_NONE,
-}
+client = AsyncOpenAI(
+    api_key=GROQ_API_KEY,
+    base_url="https://api.groq.com/openai/v1"
+)
 
-# Используем модель из вашего списка
-MODEL_NAME = "models/gemini-2.0-flash"
-
-async def split_content_to_posts(user_text):
-    """
-    Генерирует контент с ЖЕСТКИМ следованием роли автора.
-    """
-    style_instruction = await get_style_prompt()
+def analyze_style_metrics(style_text):
+    if not style_text: return "Standard blog post"
+    posts = style_text.split("---")
+    avg_len = sum(len(p.split()) for p in posts if len(p.split()) > 5) / max(len(posts), 1)
     
-    # Получаем историю, чтобы не повторяться
+    if avg_len < 40: return "Short, punchy, Twitter-like"
+    if avg_len > 150: return "Deep storytelling, long-reads"
+    return "Standard Instagram/Telegram caption size"
+
+async def split_content_to_posts(user_text, channel_id):
+    style_instruction = await get_style_prompt(channel_id)
+    length_guide = analyze_style_metrics(style_instruction)
+    
     try:
-        recent_history = await get_recent_generated_posts(limit=10)
+        recent_history = await get_recent_generated_posts(channel_id, limit=3)
     except:
-        recent_history = "No history yet."
+        recent_history = ""
 
     system_instruction = (
-        "🛑 SYSTEM OVERRIDE: YOU ARE NOT AN AI ASSISTANT. YOU ARE A HUMAN AUTHOR.\n"
-        "Your goal is to write posts for your personal Telegram channel. You must pass the 'Turing Test' — the reader must believe a human wrote this.\n\n"
+        "🛑 ROLE: You are a SOCIAL MEDIA GHOSTWRITER. You clone the author's personality.\n\n"
         
-        f"=== 🧬 AUTHOR DNA (STYLE & VOICE) ===\n{style_instruction}\n=====================================\n\n"
+        f"=== 🧬 AUTHOR DNA ===\n"
+        f"1. **Length**: {length_guide}.\n"
+        f"2. **Voice Samples**:\n{style_instruction}\n"
+        "=====================\n\n"
         
-        f"=== 🧠 SHORT TERM MEMORY (DO NOT REPEAT) ===\n{recent_history}\n============================================\n\n"
+        "=== ⚧ GENDER CRITICAL RULE (RUSSIAN LANGUAGE) ===\n"
+        "Analyze the past tense verbs in the 'Voice Samples' above:\n"
+        "1. If you see verbs ending in 'ла' (e.g., 'сделала', 'решила', 'пошла') -> **YOU ARE FEMALE**.\n"
+        "   - You MUST write: 'Я заметила', 'Я сделала', 'Я была'.\n"
+        "   - NEVER write: 'Я заметил', 'Я сделал'.\n"
+        "2. If you see verbs ending in 'л' (e.g., 'сделал', 'решил') -> **YOU ARE MALE**.\n"
+        "3. **DETECT THIS BEFORE WRITING AND STICK TO IT.**\n\n"
         
-        "=== 💀 STRICT BEHAVIOR RULES ===\n"
-        "1. **ABSOLUTE MIMICRY**: Copy the author's sentence length, punctuation quirks (lots of '...' or '!!!'?), emoji usage, and vocabulary depth.\n"
-        "2. **NO AI FILLER**: NEVER use phrases like 'In today's world', 'Let's dive in', 'Here is a post', 'Hope you like it'. Just write the content.\n"
-        "3. **PERSONALITY**: If the examples show the author is cynical, be cynical. If they are cheerful, be cheerful. Do not be neutrally polite.\n"
-        "4. **GENDER CONSISTENCY**: Detect the gender from the examples (verbs like 'сделала' vs 'сделал') and stick to it strictly.\n"
-        "5. **STRUCTURE**: Do NOT artificially split one coherent thought into multiple posts. Only split if there are distinct topics.\n"
-        "6. **FORMAT**: Output ONLY a JSON array of strings. No markdown outside the JSON."
+        "=== 🚫 NEGATIVE CONSTRAINTS ===\n"
+        "1. **NO CALENDAR**: Do not start posts with 'On Monday', 'Today', 'Yesterday'.\n"
+        "2. **NO CHRONOLOGY**: Each post must stand alone.\n"
+        "3. **NO ROBOTIC LISTS**: Do not just list features. Tell a story.\n\n"
+        
+        "=== ✅ TASK ===\n"
+        "1. **TOPIC HANDLING**: If multiple topics are provided, write separate posts for each.\n"
+        "2. **FORMAT**: Return ONLY a JSON object: {\"posts\": [\"Post 1 text...\", \"Post 2 text...\"]}.\n"
+        "3. **LANGUAGE**: Russian."
     )
 
-    # Увеличиваем temperature до 0.85 для большей "человечности" и непредсказуемости
-    # Но используем top_p для удержания смысловой нити
-    model = genai.GenerativeModel(
-        model_name=MODEL_NAME, 
-        system_instruction=system_instruction,
-        safety_settings=safety_settings,
-        generation_config={
-            "response_mime_type": "application/json",
-            "temperature": 0.85,
-            "top_p": 0.95
-        }
-    )
-
-    try:
-        # Добавляем "давление" в сам запрос пользователя
-        prompt = (
-            f"TASK: Write a post (or posts) based on this topic: '{user_text}'.\n"
-            "MODE: Deep Roleplay. Write exactly as THE AUTHOR would write."
-        )
-        
-        response = await model.generate_content_async(prompt)
-        posts = json.loads(response.text)
-        return posts if isinstance(posts, list) else [str(posts)]
-    except Exception as e:
-        print(f"Gemini Split Error: {e}")
-        return []
-
-async def rewrite_post_gpt(text):
-    """Переписывает пост"""
-    model = genai.GenerativeModel(model_name=MODEL_NAME, safety_settings=safety_settings)
+    safe_user_text = user_text.replace("на неделю", "").replace("план на неделю", "")
     
     prompt = (
-        "ACT AS THE AUTHOR. Rewrite this post to sound more natural and engaging. "
-        "Keep the same meaning but change the wording. "
-        f"Text:\n{text}"
+        f"REQUEST: {safe_user_text}\n\n"
+        "TASK: Write distinct posts based on these topics. \n"
+        "Strictly follow the author's gender (Male/Female) based on the samples provided."
     )
-    
+
     try:
-        response = await model.generate_content_async(prompt)
-        return response.text
-    except:
+        response = await client.chat.completions.create(
+            model=GROQ_MODEL,
+            messages=[
+                {"role": "system", "content": system_instruction},
+                {"role": "user", "content": prompt}
+            ],
+            temperature=0.7, 
+            response_format={"type": "json_object"}
+        )
+
+        response_text = response.choices[0].message.content.strip()
+        data = json.loads(response_text)
+        
+        if "posts" in data and isinstance(data["posts"], list):
+            return [str(p) for p in data["posts"]]
+        
+        for key, value in data.items():
+            if isinstance(value, list):
+                return [str(v) for v in value]
+        return []
+
+    except Exception as e:
+        print(f"❌ Groq Error: {e}")
+        return []
+
+async def rewrite_post_gpt(text, channel_id):
+    """Рерайт"""
+    style_instruction = await get_style_prompt(channel_id)
+    try:
+        response = await client.chat.completions.create(
+            model=GROQ_MODEL,
+            messages=[
+                {"role": "system", "content": f"You are a professional editor. Rewrite this text to match this style. CHECK THE GENDER (Male/Female) in the style samples and fix any gender errors:\n{style_instruction}"},
+                {"role": "user", "content": text}
+            ],
+            temperature=0.7
+        )
+        return response.choices[0].message.content.strip()
+    except Exception as e:
         return text
 
 def clear_context(user_id):
